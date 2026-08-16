@@ -139,23 +139,49 @@ def group_and_save_in_memory(results, out_dir, meta_df=None):
 
 
 def merge_with_csv(out_dir, csv_path, id_column='image_id', file_stem_column=None):
-    # Creates a metadata CSV linking preprocessed files to clinical data
+    # Creates a metadata CSV linking preprocessed files to clinical data.
+    # Some synthetic datasets do not include an image_id column; in that case,
+    # we fall back to row-order matching when the CSV length matches the number
+    # of processed images.
     csv_name = Path(csv_path).name.lower()
     if csv_name in IGNORE_CSV_NAMES:
         print(f'Ignored CSV "{csv_name}" — skipping merge (irrelevant file).')
         return ''
+
     df = pd.read_csv(csv_path)
     out_dir = Path(out_dir)
+    npz_files = sorted(out_dir.glob('*.npz'))
+
+    if id_column not in df.columns and not file_stem_column:
+        if len(df) == len(npz_files):
+            records = []
+            for idx, p in enumerate(npz_files):
+                row = df.iloc[idx].to_dict()
+                row.update({'preproc_file': str(p), 'image_stem': p.stem})
+                records.append(row)
+            meta = pd.DataFrame(records)
+            meta_path = out_dir / 'metadata.csv'
+            meta.to_csv(meta_path, index=False)
+            return str(meta_path)
+        print(f'Warning: CSV has no "{id_column}" and no matching stem column. Skipping metadata merge.')
+        return ''
+
     records = []
-    for p in out_dir.glob('*.npz'):
+    for p in npz_files:
         stem = p.stem
-        # try to match by stem
-        match = df[df[id_column].astype(str) == stem]
-        if match.empty and file_stem_column:
+        match = df[df[id_column].astype(str) == stem] if id_column in df.columns else pd.DataFrame()
+        if match.empty and file_stem_column and file_stem_column in df.columns:
             match = df[df[file_stem_column].astype(str) == stem]
+        if match.empty and len(df) == len(npz_files):
+            # fallback: preserve row order if CSV and files are aligned by count
+            row = df.iloc[npz_files.index(p)].to_dict()
+            row.update({'preproc_file': str(p), 'image_stem': stem})
+            records.append(row)
+            continue
         row = match.to_dict(orient='records')[0] if not match.empty else {}
         row.update({'preproc_file': str(p), 'image_stem': stem})
         records.append(row)
+
     meta = pd.DataFrame(records)
     meta_path = out_dir / 'metadata.csv'
     meta.to_csv(meta_path, index=False)
@@ -197,7 +223,10 @@ def main():
     print(f'Processed: {len(results)-len(errors)}; Errors: {len(errors)}')
     if args.csv:
         meta = merge_with_csv(args.out_dir, args.csv, id_column=args.id_column)
-        print('Wrote metadata to', meta)
+        if meta:
+            print('Wrote metadata to', meta)
+        else:
+            print('Metadata merge skipped because the CSV does not contain a valid image identifier column.')
 
 
 if __name__ == '__main__':
